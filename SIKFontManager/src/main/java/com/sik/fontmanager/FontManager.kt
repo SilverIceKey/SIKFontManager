@@ -11,10 +11,12 @@ import android.view.ViewGroup
 import android.widget.TextView
 import androidx.core.content.res.ResourcesCompat
 import java.io.File
+import java.lang.ref.WeakReference
 
 object FontManager {
 
     private var defaultTypeface: Typeface? = null
+    private val activities = mutableListOf<WeakReference<Activity>>()
 
     fun init(context: Context) {
         try {
@@ -41,33 +43,21 @@ object FontManager {
                 else -> null
             }
 
-            (context as? Application)?.let {
-                it.registerActivityLifecycleCallbacks(FontLifecycleCallback())
-                updateAllActivities(it)
-            }
+            // 更新所有存储的活动
+            updateAllActivities()
         } catch (e: Exception) {
             e.printStackTrace() // 捕获并打印异常，防止崩溃
         }
     }
 
-    private fun updateAllActivities(application: Application) {
-        try {
-            application.registerActivityLifecycleCallbacks(object :
-                Application.ActivityLifecycleCallbacks {
-                override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
-                override fun onActivityStarted(activity: Activity) {}
-                override fun onActivityResumed(activity: Activity) {
-                    applyFontToViews(activity.window.decorView)
-                }
-
-                override fun onActivityPaused(activity: Activity) {}
-                override fun onActivityStopped(activity: Activity) {}
-                override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
-                override fun onActivityDestroyed(activity: Activity) {}
-            })
-        } catch (e: Exception) {
-            e.printStackTrace() // 捕获并打印异常，防止崩溃
+    private fun updateAllActivities() {
+        activities.forEach { weakRef ->
+            weakRef.get()?.let { activity ->
+                applyFontToViews(activity.window.decorView)
+            }
         }
+        // 移除已经被垃圾回收的活动
+        activities.removeAll { it.get() == null }
     }
 
     private fun applyFontToViews(view: View) {
@@ -105,5 +95,21 @@ object FontManager {
 
     fun getDefaultTypeface(): Typeface? {
         return defaultTypeface
+    }
+
+    private class FontLifecycleCallback : Application.ActivityLifecycleCallbacks {
+        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+            activities.add(WeakReference(activity))
+        }
+
+        override fun onActivityDestroyed(activity: Activity) {
+            activities.removeAll { it.get() == activity || it.get() == null }
+        }
+
+        override fun onActivityStarted(activity: Activity) {}
+        override fun onActivityResumed(activity: Activity) {}
+        override fun onActivityPaused(activity: Activity) {}
+        override fun onActivityStopped(activity: Activity) {}
+        override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
     }
 }
