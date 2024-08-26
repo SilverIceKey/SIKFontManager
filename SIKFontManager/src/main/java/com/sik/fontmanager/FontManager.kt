@@ -21,9 +21,10 @@ object FontManager {
     fun init(context: Context) {
         try {
             val fontSource = getMetaData(context, "fontSource")
-            val fontType = getMetaData(context, "fontType")
+            val fontType =
+                FontSourceTypeEnums.getFontSourceType(getMetaData(context, "fontType") ?: "")
 
-            if (fontSource.isNullOrEmpty() || fontType.isNullOrEmpty()) {
+            if (fontSource.isNullOrEmpty() || fontType == FontSourceTypeEnums.UNKNOW) {
                 return
             }
 
@@ -34,12 +35,15 @@ object FontManager {
         }
     }
 
-    fun setDefaultFont(context: Context, fontSource: String, fontType: String) {
+    fun setDefaultFont(context: Context, fontSource: String, fontType: FontSourceTypeEnums) {
         try {
             defaultTypeface = when (fontType) {
-                "assets" -> Typeface.createFromAsset(context.assets, fontSource)
-                "res" -> ResourcesCompat.getFont(context, getResId(context, fontSource))
-                "file" -> Typeface.createFromFile(File(fontSource))
+                FontSourceTypeEnums.ASSETS -> Typeface.createFromAsset(context.assets, fontSource)
+                FontSourceTypeEnums.RES -> ResourcesCompat.getFont(
+                    context, getResId(context, fontSource)
+                )
+
+                FontSourceTypeEnums.FILE -> Typeface.createFromFile(File(fontSource))
                 else -> null
             }
 
@@ -79,8 +83,7 @@ object FontManager {
     private fun getMetaData(context: Context, key: String): String? {
         return try {
             val appInfo = context.packageManager.getApplicationInfo(
-                context.packageName,
-                PackageManager.GET_META_DATA
+                context.packageName, PackageManager.GET_META_DATA
             )
             appInfo.metaData?.getString(key)
         } catch (e: PackageManager.NameNotFoundException) {
