@@ -5,10 +5,12 @@ import android.app.Application
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Typeface
+import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
+import androidx.annotation.RequiresApi
 import androidx.core.content.res.ResourcesCompat
 import java.io.File
 import java.lang.ref.WeakReference
@@ -17,7 +19,9 @@ object FontManager {
 
     private var defaultTypeface: Typeface? = null
     private val activities = mutableListOf<WeakReference<Activity>>()
+    private val applyActivity: HashMap<String, Boolean> = hashMapOf()
 
+    @RequiresApi(Build.VERSION_CODES.ICE_CREAM_SANDWICH)
     fun init(context: Context) {
         try {
             val fontSource = getMetaData(context, "fontSource")
@@ -35,6 +39,7 @@ object FontManager {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.DONUT)
     fun setDefaultFont(context: Context, fontSource: String, fontType: FontSourceTypeEnums) {
         try {
             defaultTypeface = when (fontType) {
@@ -100,6 +105,7 @@ object FontManager {
         return defaultTypeface
     }
 
+    @RequiresApi(Build.VERSION_CODES.ICE_CREAM_SANDWICH)
     private class FontLifecycleCallback : Application.ActivityLifecycleCallbacks {
         override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
             activities.add(WeakReference(activity))
@@ -107,10 +113,17 @@ object FontManager {
 
         override fun onActivityDestroyed(activity: Activity) {
             activities.removeAll { it.get() == activity || it.get() == null }
+            applyActivity[activity.javaClass.simpleName] = false
         }
 
         override fun onActivityStarted(activity: Activity) {}
-        override fun onActivityResumed(activity: Activity) {}
+        override fun onActivityResumed(activity: Activity) {
+            if (applyActivity[activity.javaClass.simpleName] == false) {
+                applyFontToViews(activity.window.decorView)
+                applyActivity[activity.javaClass.simpleName] = true
+            }
+        }
+
         override fun onActivityPaused(activity: Activity) {}
         override fun onActivityStopped(activity: Activity) {}
         override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
