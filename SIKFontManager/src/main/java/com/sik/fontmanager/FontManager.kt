@@ -19,7 +19,7 @@ object FontManager {
 
     private var defaultTypeface: Typeface? = null
     private val activities = mutableListOf<WeakReference<Activity>>()
-    private val applyActivity: HashMap<String, Boolean> = hashMapOf()
+    private val applyActivity: HashMap<String, Boolean?> = hashMapOf()
 
     @RequiresApi(Build.VERSION_CODES.ICE_CREAM_SANDWICH)
     fun init(context: Context) {
@@ -180,9 +180,10 @@ object FontManager {
 
         override fun onActivityStarted(activity: Activity) {}
         override fun onActivityResumed(activity: Activity) {
-            if (applyActivity[activity.javaClass.simpleName] == false) {
+            val key = activity.javaClass.simpleName
+            if (defaultTypeface != null && applyActivity[key] != true) {
                 applyFontToViews(activity.window.decorView)
-                applyActivity[activity.javaClass.simpleName] = true
+                applyActivity[key] = true
             }
         }
 
