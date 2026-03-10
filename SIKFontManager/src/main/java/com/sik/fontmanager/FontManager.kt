@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.os.Build
-import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
@@ -18,24 +17,32 @@ import java.lang.ref.WeakReference
 object FontManager {
 
     private var defaultTypeface: Typeface? = null
-    private var defaultFontWeight: FontWeightEnums = FontWeightEnums.NORMAL
+    private var defaultFontWeight: FontWeightEnum = FontWeightEnum.NORMAL
+    private var variableFontEnabled: Boolean = false
 
     private val activities = mutableListOf<WeakReference<Activity>>()
-    private val applyActivity: HashMap<String, Boolean?> = hashMapOf()
 
     @RequiresApi(Build.VERSION_CODES.ICE_CREAM_SANDWICH)
     fun init(context: Context) {
         try {
-            val fontSource = getMetaData(context, "fontSource")
+            val fontSource = getMetaDataString(context, "fontSource")
             val fontType =
-                FontSourceTypeEnums.getFontSourceType(getMetaData(context, "fontType") ?: "")
-            defaultFontWeight = FontWeightEnums.from(getMetaData(context, "fontWeight"))
+                FontSourceTypeEnums.getFontSourceType(getMetaDataString(context, "fontType") ?: "")
+            defaultFontWeight = FontWeightEnum.parse(getMetaDataString(context, "fontWeight"))
+            variableFontEnabled = getMetaDataBoolean(context, "fontIsVariable")
 
             if (fontSource.isNullOrEmpty() || fontType == FontSourceTypeEnums.UNKNOW) {
                 return
             }
 
-            setDefaultFont(context, fontSource, fontType)
+            setDefaultFont(
+                context = context,
+                fontSource = fontSource,
+                fontType = fontType,
+                fontWeight = defaultFontWeight,
+                isVariableFont = variableFontEnabled,
+            )
+
             (context as? Application)?.registerActivityLifecycleCallbacks(FontLifecycleCallback())
         } catch (e: Exception) {
             e.printStackTrace()
@@ -47,17 +54,24 @@ object FontManager {
         context: Context,
         fontSource: String,
         fontType: FontSourceTypeEnums,
-        fontWeight: FontWeightEnums = defaultFontWeight,
+        fontWeight: FontWeightEnum = defaultFontWeight,
+        isVariableFont: Boolean = variableFontEnabled,
     ) {
         try {
             defaultFontWeight = fontWeight
+            variableFontEnabled = isVariableFont
+
             defaultTypeface = when (fontType) {
                 FontSourceTypeEnums.ASSETS -> {
                     Typeface.createFromAsset(context.assets, fontSource)
                 }
 
                 FontSourceTypeEnums.RES -> {
-                    resolveResTypeface(context, fontSource, fontWeight)
+                    resolveResTypeface(
+                        context = context,
+                        fontSource = fontSource,
+                        isVariableFont = isVariableFont,
+                    )
                 }
 
                 FontSourceTypeEnums.FILE -> {
@@ -74,22 +88,41 @@ object FontManager {
     }
 
     /**
-     * RES 字体解析策略：
-     * 1. 先尝试按默认字重优先命中
-     * 2. 再兜底回退到其它常见后缀
-     * 3. 兼容旧逻辑：fontSource 直接就是完整资源名
+     * RES 字体解析：
+     *
+     * - variable font：fontSource 必须是 res/font 下实际资源名
+     * - static font：兼容旧逻辑，支持基准名 + 后缀猜测
      */
     private fun resolveResTypeface(
         context: Context,
         fontSource: String,
-        fontWeight: FontWeightEnums,
+        isVariableFont: Boolean,
     ): Typeface? {
+        if (isVariableFont) {
+            val vfId = getResId(context, fontSource)
+            if (vfId != 0) {
+                return ResourcesCompat.getFont(context, vfId)
+            }
+            return null
+        }
+
         val directId = getResId(context, fontSource)
         if (directId != 0) {
             return ResourcesCompat.getFont(context, directId)
         }
 
-        val candidates = buildResCandidates(fontSource, fontWeight)
+        val candidates = listOf(
+            "${fontSource}_regular",
+            fontSource,
+            "${fontSource}_medium",
+            "${fontSource}_bold",
+            "${fontSource}_semibold",
+            "${fontSource}_light",
+            "${fontSource}_thin",
+            "${fontSource}_black",
+            "${fontSource}_extralight",
+            "${fontSource}_extrabold",
+        )
 
         for (name in candidates) {
             val id = getResId(context, name)
@@ -101,34 +134,16 @@ object FontManager {
         return null
     }
 
-    private fun buildResCandidates(baseName: String, fontWeight: FontWeightEnums): List<String> {
-        val preferredSuffix = when (fontWeight) {
-            FontWeightEnums.THIN -> "_thin"
-            FontWeightEnums.EXTRA_LIGHT -> "_extralight"
-            FontWeightEnums.LIGHT -> "_light"
-            FontWeightEnums.NORMAL -> "_regular"
-            FontWeightEnums.MEDIUM -> "_medium"
-            FontWeightEnums.SEMI_BOLD -> "_semibold"
-            FontWeightEnums.BOLD -> "_bold"
-            FontWeightEnums.EXTRA_BOLD -> "_extrabold"
-            FontWeightEnums.BLACK -> "_black"
-        }
+    internal fun onActivityCreated(activity: Activity) {
+        activities.add(WeakReference(activity))
+    }
 
-        val fallbackSuffixes = listOf(
-            preferredSuffix,
-            "",
-            "_regular",
-            "_medium",
-            "_bold",
-            "_semibold",
-            "_light",
-            "_thin",
-            "_black",
-            "_extralight",
-            "_extrabold",
-        ).distinct()
+    internal fun onActivityDestroyed(activity: Activity) {
+        activities.removeAll { it.get() == null || it.get() == activity }
+    }
 
-        return fallbackSuffixes.map { suffix -> "$baseName$suffix" }
+    internal fun onActivityResumed(activity: Activity) {
+        applyFontToViews(activity.window.decorView)
     }
 
     private fun updateAllActivities() {
@@ -140,15 +155,22 @@ object FontManager {
         activities.removeAll { it.get() == null }
     }
 
-    private fun applyFontToViews(view: View) {
+    internal fun applyFontToViews(view: View) {
         try {
-            if (view is ViewGroup) {
-                for (i in 0 until view.childCount) {
-                    applyFontToViews(view.getChildAt(i))
+            when (view) {
+                is ViewGroup -> {
+                    for (i in 0 until view.childCount) {
+                        applyFontToViews(view.getChildAt(i))
+                    }
                 }
-            } else if (view is TextView) {
-                defaultTypeface?.let { baseTypeface ->
-                    view.typeface = applyWeight(baseTypeface, defaultFontWeight, isItalic(view))
+
+                is TextView -> {
+                    val baseTypeface = defaultTypeface ?: return
+                    view.typeface = applyWeight(
+                        baseTypeface = baseTypeface,
+                        fontWeight = defaultFontWeight,
+                        italic = view.typeface?.isItalic == true,
+                    )
                 }
             }
         } catch (e: Exception) {
@@ -156,33 +178,69 @@ object FontManager {
         }
     }
 
-    private fun isItalic(textView: TextView): Boolean {
-        val current = textView.typeface
-        return current?.isItalic == true
-    }
-
+    /**
+     * View 侧默认字重处理策略：
+     *
+     * - API 28+：支持 Typeface.create(typeface, weight, italic)
+     * - API 26~27：系统支持 variable font，但这里先不做伪精确控制
+     * - API < 26：只能降级到 NORMAL/BOLD
+     */
     private fun applyWeight(
         baseTypeface: Typeface,
-        fontWeight: FontWeightEnums,
+        fontWeight: FontWeightEnum,
         italic: Boolean,
     ): Typeface {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            Typeface.create(baseTypeface, fontWeight.api28Weight, italic)
-        } else {
-            Typeface.create(baseTypeface, fontWeight.legacyStyle)
+        return when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P -> {
+                Typeface.create(baseTypeface, fontWeight.weight, italic)
+            }
+
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> {
+                baseTypeface
+            }
+
+            else -> {
+                Typeface.create(
+                    baseTypeface,
+                    if (fontWeight.weight >= FontWeightEnum.SEMI_BOLD.weight) {
+                        Typeface.BOLD
+                    } else {
+                        Typeface.NORMAL
+                    }
+                )
+            }
         }
     }
 
-    private fun getMetaData(context: Context, key: String): String? {
+    private fun getMetaDataString(context: Context, key: String): String? {
         return try {
             val appInfo = context.packageManager.getApplicationInfo(
                 context.packageName,
                 PackageManager.GET_META_DATA
             )
-            appInfo.metaData?.getString(key)
-        } catch (e: PackageManager.NameNotFoundException) {
+            appInfo.metaData?.get(key)?.toString()
+        } catch (e: Exception) {
             e.printStackTrace()
             null
+        }
+    }
+
+    private fun getMetaDataBoolean(context: Context, key: String): Boolean {
+        return try {
+            val appInfo = context.packageManager.getApplicationInfo(
+                context.packageName,
+                PackageManager.GET_META_DATA
+            )
+            val value = appInfo.metaData?.get(key)
+            when (value) {
+                is Boolean -> value
+                is String -> value.equals("true", ignoreCase = true)
+                is Int -> value != 0
+                else -> false
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
         }
     }
 
@@ -190,37 +248,11 @@ object FontManager {
         return context.resources.getIdentifier(resName, "font", context.packageName)
     }
 
-    fun getDefaultTypeface(): Typeface? {
-        return defaultTypeface
-    }
+    fun getDefaultTypeface(): Typeface? = defaultTypeface
 
-    fun getDefaultFontWeight(): FontWeightEnums {
-        return defaultFontWeight
-    }
+    fun getDefaultFontWeight(): FontWeightEnum = defaultFontWeight
 
-    @RequiresApi(Build.VERSION_CODES.ICE_CREAM_SANDWICH)
-    private class FontLifecycleCallback : Application.ActivityLifecycleCallbacks {
-        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
-            activities.add(WeakReference(activity))
-        }
+    fun getDefaultFontWeightValue(): Int = defaultFontWeight.weight
 
-        override fun onActivityDestroyed(activity: Activity) {
-            activities.removeAll { it.get() == activity || it.get() == null }
-            applyActivity[activity.javaClass.simpleName] = false
-        }
-
-        override fun onActivityStarted(activity: Activity) {}
-
-        override fun onActivityResumed(activity: Activity) {
-            val key = activity.javaClass.simpleName
-            if (defaultTypeface != null && applyActivity[key] != true) {
-                applyFontToViews(activity.window.decorView)
-                applyActivity[key] = true
-            }
-        }
-
-        override fun onActivityPaused(activity: Activity) {}
-        override fun onActivityStopped(activity: Activity) {}
-        override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
-    }
+    fun isVariableFontEnabled(): Boolean = variableFontEnabled
 }
