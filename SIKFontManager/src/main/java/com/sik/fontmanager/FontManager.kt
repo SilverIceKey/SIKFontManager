@@ -20,6 +20,8 @@ object FontManager {
     private var defaultTypeface: Typeface? = null
     private var defaultFontWeight: FontWeightEnum = FontWeightEnum.NORMAL
     private var variableFontEnabled: Boolean = false
+    private val hasResumedOnce = WeakHashMap<Activity, Boolean>()
+    private val wasPaused = WeakHashMap<Activity, Boolean>()
 
     private val activities = mutableListOf<WeakReference<Activity>>()
 
@@ -164,23 +166,56 @@ object FontManager {
 
     internal fun onActivityDestroyed(activity: Activity) {
         cancelScheduledReapply(activity)
+        hasResumedOnce.remove(activity)
+        wasPaused.remove(activity)
         activities.removeAll { it.get() == null || it.get() === activity }
     }
 
     internal fun onActivityPaused(activity: Activity) {
+        wasPaused[activity] = true
         cancelScheduledReapply(activity)
     }
 
     internal fun onActivityResumed(activity: Activity) {
-        scheduleReapply(activity)
+        val firstResume = hasResumedOnce.put(activity, true) == null
+        val resumedFromPause = wasPaused.remove(activity) == true
+
+        when {
+            // 首次进入页面：只刷一次，别上多轮补刀
+            firstResume -> {
+                reapplyOnce(activity)
+            }
+
+            // 真正经历过 pause -> resume：才做多轮恢复补刷
+            resumedFromPause -> {
+                scheduleRecoveryReapply(activity)
+            }
+
+            else -> {
+                // 其他情况不做额外处理
+            }
+        }
     }
 
     private fun updateAllActivities() {
         activities.removeAll { it.get() == null }
         activities.forEach { weakRef ->
             weakRef.get()?.let { activity ->
-                scheduleReapply(activity)
+                reapplyOnce(activity)
             }
+        }
+    }
+
+    private fun reapplyOnce(activity: Activity) {
+        val decorView = activity.window?.decorView ?: return
+        val baseTypeface = defaultTypeface ?: return
+
+        decorView.post {
+            if (activity.isFinishing) return@post
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && activity.isDestroyed) {
+                return@post
+            }
+            applyFontToViewsInternal(decorView, baseTypeface)
         }
     }
 
@@ -188,7 +223,7 @@ object FontManager {
      * 无感重刷入口：
      * 回前台时不是只刷一次，而是刷多轮，尽量压住恢复时机偏晚的 View/三方控件。
      */
-    private fun scheduleReapply(activity: Activity) {
+    private fun scheduleRecoveryReapply(activity: Activity) {
         val decorView = activity.window?.decorView ?: return
         val baseTypeface = defaultTypeface ?: return
 
