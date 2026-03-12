@@ -13,6 +13,7 @@ import androidx.annotation.RequiresApi
 import androidx.core.content.res.ResourcesCompat
 import java.io.File
 import java.lang.ref.WeakReference
+import java.util.WeakHashMap
 
 object FontManager {
 
@@ -21,6 +22,26 @@ object FontManager {
     private var variableFontEnabled: Boolean = false
 
     private val activities = mutableListOf<WeakReference<Activity>>()
+
+    /**
+     * 回前台后的多轮补刷。
+     *
+     * 目的：
+     * 1. 避免 onResume 时机太早，被后续 View/Fragment/三方控件恢复流程覆盖
+     * 2. 对“切第三方 app -> 回来后字重掉回 thin”做无感兜底
+     */
+    private val resumeReapplyDelays = longArrayOf(
+        0L,
+        16L,
+        48L,
+        120L,
+        260L
+    )
+
+    /**
+     * 每个 Activity 当前挂着的补刷任务，防止重复叠加。
+     */
+    private val pendingReapplyTasks = WeakHashMap<Activity, MutableList<Runnable>>()
 
     @RequiresApi(Build.VERSION_CODES.ICE_CREAM_SANDWICH)
     fun init(context: Context) {
@@ -135,37 +156,100 @@ object FontManager {
     }
 
     internal fun onActivityCreated(activity: Activity) {
-        activities.add(WeakReference(activity))
+        val exists = activities.any { it.get() === activity }
+        if (!exists) {
+            activities.add(WeakReference(activity))
+        }
     }
 
     internal fun onActivityDestroyed(activity: Activity) {
-        activities.removeAll { it.get() == null || it.get() == activity }
+        cancelScheduledReapply(activity)
+        activities.removeAll { it.get() == null || it.get() === activity }
+    }
+
+    internal fun onActivityPaused(activity: Activity) {
+        cancelScheduledReapply(activity)
     }
 
     internal fun onActivityResumed(activity: Activity) {
-        applyFontToViews(activity.window.decorView)
+        scheduleReapply(activity)
     }
 
     private fun updateAllActivities() {
+        activities.removeAll { it.get() == null }
         activities.forEach { weakRef ->
             weakRef.get()?.let { activity ->
-                applyFontToViews(activity.window.decorView)
+                scheduleReapply(activity)
             }
         }
-        activities.removeAll { it.get() == null }
+    }
+
+    /**
+     * 无感重刷入口：
+     * 回前台时不是只刷一次，而是刷多轮，尽量压住恢复时机偏晚的 View/三方控件。
+     */
+    private fun scheduleReapply(activity: Activity) {
+        val decorView = activity.window?.decorView ?: return
+        val baseTypeface = defaultTypeface ?: return
+
+        cancelScheduledReapply(activity)
+
+        val tasks = mutableListOf<Runnable>()
+        pendingReapplyTasks[activity] = tasks
+
+        resumeReapplyDelays.forEach { delayMs ->
+            val task = Runnable {
+                // Activity 已经结束就别再折腾
+                if (activity.isFinishing) return@Runnable
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && activity.isDestroyed) {
+                    return@Runnable
+                }
+
+                // 字体被重置时，再把当前默认字重重新打进去
+                applyFontToViewsInternal(decorView, baseTypeface)
+            }
+            tasks += task
+
+            if (delayMs == 0L) {
+                decorView.post(task)
+            } else {
+                decorView.postDelayed(task, delayMs)
+            }
+        }
+    }
+
+    private fun cancelScheduledReapply(activity: Activity) {
+        val decorView = activity.window?.decorView ?: return
+        pendingReapplyTasks.remove(activity)?.forEach { task ->
+            decorView.removeCallbacks(task)
+        }
+    }
+
+    fun reapplyToView(root: View) {
+        val baseTypeface = defaultTypeface ?: return
+        root.post {
+            applyFontToViewsInternal(root, baseTypeface)
+        }
     }
 
     internal fun applyFontToViews(view: View) {
+        val baseTypeface = defaultTypeface ?: return
+        applyFontToViewsInternal(view, baseTypeface)
+    }
+
+    private fun applyFontToViewsInternal(
+        view: View,
+        baseTypeface: Typeface,
+    ) {
         try {
             when (view) {
                 is ViewGroup -> {
                     for (i in 0 until view.childCount) {
-                        applyFontToViews(view.getChildAt(i))
+                        applyFontToViewsInternal(view.getChildAt(i), baseTypeface)
                     }
                 }
 
                 is TextView -> {
-                    val baseTypeface = defaultTypeface ?: return
                     view.typeface = applyWeight(
                         baseTypeface = baseTypeface,
                         fontWeight = defaultFontWeight,
