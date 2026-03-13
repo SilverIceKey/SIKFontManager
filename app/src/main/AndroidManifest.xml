@@ -24,6 +24,21 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <meta-data
+            android:name="fontSource"
+            android:value="mi_sans_vf" /> <!-- 字体路径 -->
+<!--        <meta-data-->
+<!--            android:name="fontSource"-->
+<!--            android:value="alimama_fang_yuan_ti_vf" /> &lt;!&ndash; 字体路径 &ndash;&gt;-->
+        <meta-data
+            android:name="fontType"
+            android:value="res" />
+        <meta-data
+            android:name="fontIsVariable"
+            android:value="true" />
+        <meta-data
+            android:name="fontWeight"
+            android:value="NORMAL" />
     </application>
 
 </manifest>

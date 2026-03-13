@@ -22,7 +22,7 @@ import androidx.compose.ui.text.font.FontWeight
 fun ProvideFontManager(content: @Composable () -> Unit) {
     val context = LocalContext.current
     val config = remember(context) { getFontConfigFromMeta(context) }
-    val defaultComposeWeight = FontManager.getDefaultFontWeight().compose
+    val defaultComposeWeight = config.defaultFontWeight.compose
 
     val fontFamily = remember(context, config) {
         resolveFontFamily(
@@ -36,12 +36,9 @@ fun ProvideFontManager(content: @Composable () -> Unit) {
         return
     }
 
-    val mergedLocalTextStyle = LocalTextStyle.current.merge(
-        TextStyle(
-            fontFamily = fontFamily,
-            fontWeight = defaultComposeWeight,
-            fontSynthesis = FontSynthesis.None,
-        )
+    val mergedLocalTextStyle = LocalTextStyle.current.withGlobalFontDefaults(
+        fontFamily = fontFamily,
+        defaultFontWeight = defaultComposeWeight,
     )
 
     val patchedTypography = MaterialTheme.typography.withGlobalFontDefaults(
@@ -228,15 +225,9 @@ private fun TextStyle.withGlobalFontDefaults(
     fontFamily: FontFamily,
     defaultFontWeight: FontWeight,
 ): TextStyle {
-    val patchedWeight = when (fontWeight) {
-        null -> defaultFontWeight
-        FontWeight.Normal -> defaultFontWeight
-        else -> fontWeight
-    }
-
     return copy(
         fontFamily = fontFamily,
-        fontWeight = patchedWeight,
+        fontWeight = fontWeight ?: defaultFontWeight,
         fontSynthesis = FontSynthesis.None,
     )
 }
