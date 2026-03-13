@@ -1,5 +1,6 @@
 package com.sik.fontmanager
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.Application
 import android.content.Context
@@ -11,6 +12,8 @@ import android.view.ViewGroup
 import android.widget.TextView
 import androidx.annotation.RequiresApi
 import androidx.core.content.res.ResourcesCompat
+import androidx.fragment.app.FragmentActivity
+import androidx.fragment.app.FragmentManager
 import java.io.File
 import java.lang.ref.WeakReference
 import java.util.WeakHashMap
@@ -24,18 +27,19 @@ object FontManager {
     private val activities = mutableListOf<WeakReference<Activity>>()
 
     /**
+     * 避免同一个 FragmentManager 重复注册
+     */
+    private val registeredFragmentManagers = WeakHashMap<FragmentManager, Boolean>()
+
+    /**
      * 记录 TextView 的字重策略：
      * - AUTO：未显式指定字重，使用全局默认字重
-     * - EXPLICIT：控件自身已显式指定字重/italic，后续恢复时保留它自己的
+     * - EXPLICIT：控件自身显式指定过字重/italic，后续恢复时保留
      */
     private val textViewPolicies = WeakHashMap<TextView, TextViewFontPolicy>()
 
     /**
-     * 回前台后的多轮补刷。
-     *
-     * 目的：
-     * 1. 避免 onResume 时机太早，被后续 View/Fragment/三方控件恢复流程覆盖
-     * 2. 覆盖 AndroidView / 三方控件晚 attach / 晚恢复的情况
+     * 回前台 / Fragment View 创建后的多轮补刷
      */
     private val resumeReapplyDelays = longArrayOf(
         0L,
@@ -46,9 +50,14 @@ object FontManager {
     )
 
     /**
-     * 每个 Activity 当前挂着的补刷任务，防止重复叠加。
+     * Activity 级补刷任务
      */
-    private val pendingReapplyTasks = WeakHashMap<Activity, MutableList<Runnable>>()
+    private val pendingActivityReapplyTasks = WeakHashMap<Activity, MutableList<Runnable>>()
+
+    /**
+     * 任意 rootView（如 Fragment root / AndroidView root）级补刷任务
+     */
+    private val pendingRootReapplyTasks = WeakHashMap<View, MutableList<Runnable>>()
 
     private enum class WeightMode {
         AUTO,
@@ -128,7 +137,6 @@ object FontManager {
 
     /**
      * RES 字体解析：
-     *
      * - variable font：fontSource 必须是 res/font 下实际资源名
      * - static font：兼容旧逻辑，支持基准名 + 后缀猜测
      */
@@ -178,6 +186,15 @@ object FontManager {
         if (!exists) {
             activities.add(WeakReference(activity))
         }
+        registerFragmentCallbacksIfNeeded(activity)
+    }
+
+    internal fun onActivityResumed(activity: Activity) {
+        scheduleRecoveryReapply(activity)
+    }
+
+    internal fun onActivityPaused(activity: Activity) {
+        cancelScheduledReapply(activity)
     }
 
     internal fun onActivityDestroyed(activity: Activity) {
@@ -185,12 +202,28 @@ object FontManager {
         activities.removeAll { it.get() == null || it.get() === activity }
     }
 
-    internal fun onActivityPaused(activity: Activity) {
-        cancelScheduledReapply(activity)
+    internal fun onFragmentViewCreated(root: View) {
+        scheduleRecoveryReapply(root)
     }
 
-    internal fun onActivityResumed(activity: Activity) {
-        scheduleRecoveryReapply(activity)
+    internal fun onFragmentResumed(root: View?) {
+        root ?: return
+        scheduleRecoveryReapply(root)
+    }
+
+    private fun registerFragmentCallbacksIfNeeded(activity: Activity) {
+        val fragmentActivity = activity as? FragmentActivity ?: return
+        val fragmentManager = fragmentActivity.supportFragmentManager
+
+        if (registeredFragmentManagers[fragmentManager] == true) {
+            return
+        }
+
+        fragmentManager.registerFragmentLifecycleCallbacks(
+            FontFragmentLifecycleCallback,
+            true
+        )
+        registeredFragmentManagers[fragmentManager] = true
     }
 
     private fun updateAllActivities() {
@@ -203,8 +236,7 @@ object FontManager {
     }
 
     /**
-     * 无感重刷入口：
-     * 回前台/全量更新时做多轮补刷，尽量压住恢复时机偏晚的 View/三方控件。
+     * Activity decorView 的多轮补刷
      */
     private fun scheduleRecoveryReapply(activity: Activity) {
         val decorView = activity.window?.decorView ?: return
@@ -213,7 +245,7 @@ object FontManager {
         cancelScheduledReapply(activity)
 
         val tasks = mutableListOf<Runnable>()
-        pendingReapplyTasks[activity] = tasks
+        pendingActivityReapplyTasks[activity] = tasks
 
         resumeReapplyDelays.forEach { delayMs ->
             val task = Runnable {
@@ -230,18 +262,47 @@ object FontManager {
         }
     }
 
+    /**
+     * Fragment root / AndroidView root 的多轮补刷
+     */
+    private fun scheduleRecoveryReapply(root: View) {
+        val baseTypeface = defaultTypeface ?: return
+
+        cancelScheduledReapply(root)
+
+        val tasks = mutableListOf<Runnable>()
+        pendingRootReapplyTasks[root] = tasks
+
+        resumeReapplyDelays.forEach { delayMs ->
+            val task = Runnable {
+                if (!root.isAttachedToWindowCompat()) return@Runnable
+                applyFontToViewsInternal(root, baseTypeface)
+            }
+            tasks += task
+
+            if (delayMs == 0L) {
+                root.post(task)
+            } else {
+                root.postDelayed(task, delayMs)
+            }
+        }
+    }
+
     private fun cancelScheduledReapply(activity: Activity) {
         val decorView = activity.window?.decorView ?: return
-        pendingReapplyTasks.remove(activity)?.forEach { task ->
+        pendingActivityReapplyTasks.remove(activity)?.forEach { task ->
             decorView.removeCallbacks(task)
         }
     }
 
-    fun reapplyToView(root: View) {
-        val baseTypeface = defaultTypeface ?: return
-        root.post {
-            applyFontToViewsInternal(root, baseTypeface)
+    private fun cancelScheduledReapply(root: View) {
+        pendingRootReapplyTasks.remove(root)?.forEach { task ->
+            root.removeCallbacks(task)
         }
+    }
+
+    fun reapplyToView(root: View) {
+        scheduleRecoveryReapply(root)
     }
 
     internal fun applyFontToViews(view: View) {
@@ -291,10 +352,7 @@ object FontManager {
             fontWeight = targetWeight,
             italic = targetItalic,
         )
-
-        if (!isSameTypeface(view.typeface, targetTypeface)) {
-            view.typeface = targetTypeface
-        }
+        view.typeface = targetTypeface
     }
 
     private fun resolveTextViewFontPolicy(view: TextView): TextViewFontPolicy {
@@ -304,18 +362,13 @@ object FontManager {
     }
 
     /**
-     * 首次命中 TextView 时做一次策略判定：
+     * 策略：
+     * - 当前 weight = 400 且非 italic：认为未显式指定，走 AUTO
+     * - 当前 weight != 400 或 italic = true：认为显式指定过，走 EXPLICIT
      *
-     * - 当前字重是 NORMAL(400) 且非 italic：认为没显式指定，走 AUTO
-     * - 当前字重不是 400，或 italic=true：认为控件自己显式指定过，走 EXPLICIT
-     *
-     * 这套判断能覆盖：
-     * - android:textStyle="bold"
-     * - android:textFontWeight="500/600/700..."
-     * - 代码里主动 setTypeface(..., bold/italic)
-     *
-     * 不能 100% 识别“显式设置了 400”的极端场景，但你当前这套全局字体库里，
-     * 这是代价最小、兼容性最稳的一种做法。
+     * 这满足你当前要求：
+     * - 指定了字重，就用指定的
+     * - 没指定，就走全局默认
      */
     private fun detectTextViewFontPolicy(view: TextView): TextViewFontPolicy {
         val currentTypeface = view.typeface ?: return TextViewFontPolicy(
@@ -326,9 +379,8 @@ object FontManager {
         val currentItalic = currentTypeface.isItalic
 
         val hasExplicitWeight = currentWeight != FontWeightEnum.NORMAL.weight
-        val hasExplicitItalic = currentItalic
 
-        return if (hasExplicitWeight || hasExplicitItalic) {
+        return if (hasExplicitWeight || currentItalic) {
             TextViewFontPolicy(
                 mode = WeightMode.EXPLICIT,
                 explicitWeight = currentWeight.coerceIn(1, 1000),
@@ -338,6 +390,14 @@ object FontManager {
             TextViewFontPolicy(
                 mode = WeightMode.AUTO
             )
+        }
+    }
+
+    private fun currentTypefaceWeight(typeface: Typeface): Int {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            typeface.weight
+        } else {
+            if (typeface.isBold) 700 else 400
         }
     }
 
@@ -352,28 +412,23 @@ object FontManager {
                 current.style == target.style
     }
 
-    private fun currentTypefaceWeight(typeface: Typeface): Int {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            typeface.weight
-        } else {
-            if (typeface.isBold) 700 else 400
-        }
-    }
-
     private fun isActivityAlive(activity: Activity): Boolean {
         if (activity.isFinishing) return false
         return !(Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && activity.isDestroyed)
     }
 
+    private fun View.isAttachedToWindowCompat(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            isAttachedToWindow
+        } else {
+            windowToken != null
+        }
+    }
+
     /**
-     * View 侧字重处理策略：
-     *
-     * - API 28+：支持 Typeface.create(typeface, weight, italic)
-     * - API 26~27：退化为 baseTypeface
-     * - API < 26：退化为 NORMAL/BOLD
-     *
-     * 你当前最低适配是 Android 9，这里实际会稳定走 API 28+ 分支。
+     * 你最低 Android 9，这里实际稳定走 API 28+ 分支
      */
+    @SuppressLint("NewApi")
     private fun applyWeight(
         baseTypeface: Typeface,
         fontWeight: Int,
@@ -435,6 +490,30 @@ object FontManager {
 
     private fun getResId(context: Context, resName: String): Int {
         return context.resources.getIdentifier(resName, "font", context.packageName)
+    }
+
+    fun bindNewView(root: View) {
+        clearTextViewPolicies(root)
+        scheduleRecoveryReapply(root)
+    }
+
+    fun refreshViewPolicyAndReapply(root: View) {
+        clearTextViewPolicies(root)
+        scheduleRecoveryReapply(root)
+    }
+
+    private fun clearTextViewPolicies(view: View) {
+        when (view) {
+            is ViewGroup -> {
+                for (i in 0 until view.childCount) {
+                    clearTextViewPolicies(view.getChildAt(i))
+                }
+            }
+
+            is TextView -> {
+                textViewPolicies.remove(view)
+            }
+        }
     }
 
     fun getDefaultTypeface(): Typeface? = defaultTypeface
